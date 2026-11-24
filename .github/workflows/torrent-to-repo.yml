@@ -1,0 +1,64 @@
+name: torrent-to-repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Magnet URI or .torrent URL of the torrent to download (required)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Branch to commit the parts to (empty = the repo default branch)'
+        required: false
+        type: string
+        default: ''
+      chunk_size_mb:
+        description: 'Part size in MB (default 2048 = 2 GiB)'
+        required: false
+        type: string
+        default: '2048'
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-chunk:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install aria2c
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip' -OutFile aria2.zip -UseBasicParsing
+          Expand-Archive -Path aria2.zip -DestinationPath aria2
+
+      - name: Download torrent
+        shell: pwsh
+        run: |
+          $aria2c = Get-ChildItem -LiteralPath 'aria2' -Filter 'aria2c.exe' -Recurse -ErrorAction Stop | Select-Object -First 1 -ExpandProperty FullName
+          New-Item -ItemType Directory -Force -Path 'downloads' | Out-Null
+          & $aria2c -d downloads '${{ inputs.source }}'
+
+      - name: Chunk files into 2 GiB parts
+        shell: pwsh
+        run: |
+          $mb = 2048
+          if ('${{ inputs.chunk_size_mb }}' -ne '') { $mb = [int]'${{ inputs.chunk_size_mb }}' }
+          if ($mb -le 0) { $mb = 2048 }
+          ./Torrent-To-GitHub.ps1 -Source downloads -ChunkSizeBytes ([int64]$mb * 1024 * 1024) -SkipDownload -SkipGitHub -Force
+
+      - name: Commit and push parts
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $status = & git status --porcelain
+          if (-not $status) { Write-Host 'No new parts to commit'; exit 0 }
+          git config user.name 'Torrent-To-Repo'
+          git config user.email 'torrent-to-repo@users.noreply.github.com'
+          git add downloads
+          git commit -m 'Add torrent parts (Torrent-To-GitHub workflow)'
+          $target = '${{ inputs.target_branch }}'
+          if ($target) { git push origin "HEAD:$target" } else { git push origin HEAD }
